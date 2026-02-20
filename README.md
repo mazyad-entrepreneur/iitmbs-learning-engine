@@ -1,4 +1,4 @@
-# Σ IIT Learn — Gamified Study Tracker
+# Σ IIT madras BS Learn — Gamified Study Tracker
 
 > An offline-first PWA for tracking IIT Madras Online BS coursework — with XP, levels, streaks, and lifetime stats.
 > **Live:** https://mazyad-entrepreneur.github.io/iitmbs-learning-engine/
