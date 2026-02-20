@@ -3,95 +3,80 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Gamified IIT-style weekly modular coursework tracker with XP, levels, and offline support.">
   <meta name="theme-color" content="#f59e0b">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="IIT Learn">
-
-  <!-- Open Graph -->
-  <meta property="og:title" content="IIT Learn — Structured Study Tracker">
-  <meta property="og:description" content="Gamified weekly modular study tracker">
-  <meta property="og:type" content="website">
-
-  <title>IIT Learn — Structured Study Tracker</title>
-
-  <!-- PWA Manifest -->
+  <meta name="description" content="Gamified IIT-style weekly study tracker with XP, levels, streaks and offline support.">
+  <title>IIT Learn</title>
   <link rel="manifest" href="./manifest.json">
-
-  <!-- Preconnect to Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-
-  <!-- Styles -->
   <link rel="stylesheet" href="./styles.css">
-
-  <!-- Inline critical: prevent flash of unstyled background -->
-  <style>
-    html { background: #0d0d14; }
-  </style>
+  <style>html { background: #0d0d14; }</style>
 </head>
-
 <body>
 
-  <!-- ══════════════════════════════════════
-       STICKY HEADER — Level, XP Bar, Streak
-  ═══════════════════════════════════════ -->
-  <header id="app-header" role="banner">
+  <!-- ═══════════════ HEADER ═══════════════ -->
+  <header id="app-header">
     <div class="hdr-brand">
       <span class="hdr-brand-sigma">Σ</span>
       <span>IIT Learn</span>
     </div>
 
     <div class="hdr-stats">
-      <div id="hdr-level" class="hdr-level">LVL 1</div>
+      <div id="hdr-level"  class="hdr-level">LVL 1</div>
 
       <div class="hdr-xp-group">
         <div id="hdr-xp" class="hdr-xp-label">0 XP · 250 to next</div>
         <div class="hdr-xp-track">
-          <div id="hdr-xp-bar" class="hdr-xp-fill" style="width: 0%"></div>
+          <div id="hdr-xp-bar" class="hdr-xp-fill" style="width:0%"></div>
         </div>
       </div>
 
       <div id="hdr-streak" class="hdr-streak">🔥 0d</div>
+      <div id="hdr-freeze" class="hdr-freeze" title="Streak Freezes">❄️ ×0</div>
     </div>
   </header>
 
-  <!-- ══════════════════════════════════════
-       MAIN CONTENT
-  ═══════════════════════════════════════ -->
-  <main id="app-main" role="main">
+  <!-- ═══════════════ MAIN ═══════════════ -->
+  <main id="app-main">
 
     <!-- Toolbar -->
     <div class="toolbar">
       <span class="toolbar-title">Weekly Modules</span>
-      <button id="btn-graph" class="btn-secondary" aria-label="Toggle XP history graph">
-        ▼ XP Graph
-      </button>
-      <button id="btn-add-week" class="btn-primary" aria-label="Add a new week">
-        + Add Week
-      </button>
+
+      <!-- Data management -->
+      <button id="btn-export" class="btn-secondary" title="Download backup JSON">⬇ Export</button>
+      <button id="btn-import" class="btn-secondary" title="Restore from backup JSON">⬆ Import</button>
+
+      <!-- Views -->
+      <button id="btn-stats"  class="btn-secondary">◎ Stats</button>
+      <button id="btn-graph"  class="btn-secondary">▼ XP Graph</button>
+
+      <!-- Add week -->
+      <button id="btn-add-week" class="btn-primary">+ Add Week</button>
     </div>
 
-    <!-- Weeks list -->
-    <section id="weeks-container" aria-label="Weeks">
-      <!-- Populated by ui.js renderWeeks() -->
-    </section>
+    <!-- Hidden file input for import -->
+    <input id="import-file-input" type="file" accept=".json" style="display:none">
 
-    <!-- XP History Graph (hidden by default) -->
-    <section id="graph-section" class="hidden" aria-label="XP history">
+    <!-- Stats panel (hidden by default) -->
+    <section id="stats-section" class="hidden"></section>
+
+    <!-- Weeks -->
+    <section id="weeks-container"></section>
+
+    <!-- XP graph (hidden by default) -->
+    <section id="graph-section" class="hidden">
       <div class="graph-title">XP History — Last 30 Days</div>
-      <canvas id="xp-chart" role="img" aria-label="Daily XP bar chart"></canvas>
+      <canvas id="xp-chart" aria-label="Daily XP chart"></canvas>
     </section>
 
   </main>
 
-  <!-- ══════════════════════════════════════
-       SCRIPTS (ES Modules)
-  ═══════════════════════════════════════ -->
   <script type="module">
     import { initApp } from './app.js';
-    // Boot the application
     document.addEventListener('DOMContentLoaded', initApp);
   </script>
 

@@ -1,82 +1,72 @@
 /**
  * app.js — Application Orchestrator
  *
- * Owns all mutable state and coordinates between:
- *   storage.js   → persistence
- *   xpEngine.js  → XP computation
- *   ui.js        → rendering
- *
- * Architecture: Event dispatch pattern.
- *   dispatch(action, payload) → mutate state → save → re-render
+ * Owns all mutable state. Coordinates storage ↔ xpEngine ↔ ui.
+ * All mutations go through dispatch(action, payload).
  */
 
-import { loadProgram, saveProgram, generateId, todayISO } from './storage.js';
-import {
-  recalculateTotalXP,
-  getLevel,
-  updateStreak,
-  isWeekCoreComplete
-} from './xpEngine.js';
-import {
-  renderHeader,
-  renderWeeks,
-  renderXPGraph,
-  showPromptModal,
-  showConfirmModal,
-  showToast
-} from './ui.js';
+import { loadProgram, saveProgram, generateId, todayISO,
+         exportBackup, parseImportedBackup } from './storage.js';
+import { recalculateTotalXP, getLevel, updateStreak,
+         isWeekCoreComplete, XP } from './xpEngine.js';
+import { renderHeader, renderStats, renderWeeks, renderXPGraph,
+         showPromptModal, showConfirmModal, showToast } from './ui.js';
 
-/* ────────────────────────────────────────────
-   APP STATE
-──────────────────────────────────────────── */
-
+/* ── App state ── */
 let program;
-
-// UI-only state (not persisted)
 const expandedWeeks    = new Set();
 const expandedLectures = new Set();
 let   graphVisible     = false;
+let   statsVisible     = false;
 
-/* ────────────────────────────────────────────
+/* ─────────────────────────────────────────
    INIT
-──────────────────────────────────────────── */
+───────────────────────────────────────── */
 
 export function initApp() {
   program = loadProgram();
 
-  // Update streak on app open
+  // Update streak (auto-uses freeze if applicable)
   const today = todayISO();
-  const { streak, lastActiveDate } = updateStreak(program, today);
-  program.streak         = streak;
-  program.lastActiveDate = lastActiveDate;
+  const result = updateStreak(program, today);
+  program.streak         = result.streak;
+  program.bestStreak     = result.bestStreak;
+  program.lastActiveDate = result.lastActiveDate;
+  program.streakFreezes  = result.streakFreezes;
 
-  // Initial XP sync (handles schema migration gaps)
+  if (result.freezeUsed) {
+    // We'll show this toast after first render
+    setTimeout(() => showToast('❄️ Streak Freeze used — streak protected!', 'info'), 600);
+  }
+
   syncXP();
   saveProgram(program);
 
-  // Register Service Worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js')
-      .then(reg => console.log('[SW] Registered:', reg.scope))
-      .catch(err => console.warn('[SW] Failed:', err));
+      .then(r => console.log('[SW] Registered:', r.scope))
+      .catch(e => console.warn('[SW] Failed:', e));
   }
 
   wireStaticListeners();
   render();
 }
 
-/* ────────────────────────────────────────────
+/* ─────────────────────────────────────────
    DISPATCH
-──────────────────────────────────────────── */
+───────────────────────────────────────── */
 
 function dispatch(action, payload = {}) {
   switch (action) {
 
-    /* ═══ WEEK MANAGEMENT ═══ */
+    /* ═══ WEEK ═══ */
 
     case 'ADD_WEEK':
       showPromptModal('New Week', 'e.g. Week 1: Linear Algebra', '', name => {
-        addWeek(name);
+        const week = makeWeek(name);
+        program.weeks.push(week);
+        expandedWeeks.add(week.weekId);
+        commit('Week added.');
       });
       break;
 
@@ -93,7 +83,7 @@ function dispatch(action, payload = {}) {
     case 'DELETE_WEEK': {
       const w = findWeek(payload.weekId);
       if (!w) break;
-      showConfirmModal(`Delete "${w.weekName}" and all its lectures?`, () => {
+      showConfirmModal(`Delete "${w.weekName}" and all its data?`, () => {
         program.weeks = program.weeks.filter(x => x.weekId !== payload.weekId);
         expandedWeeks.delete(payload.weekId);
         commit('Week deleted.');
@@ -103,17 +93,17 @@ function dispatch(action, payload = {}) {
 
     case 'TOGGLE_WEEK':
       toggle(expandedWeeks, payload.weekId);
-      render(); // UI-only — no save needed
+      render();
       break;
 
-    /* ═══ LECTURE MANAGEMENT ═══ */
+    /* ═══ LECTURE ═══ */
 
     case 'ADD_LECTURE': {
       const w = findWeek(payload.weekId);
       if (!w) break;
       showPromptModal('New Lecture', 'e.g. Lecture 3: Eigenvalues', '', name => {
-        w.lectures.push(createLecture(name));
-        expandedWeeks.add(payload.weekId); // keep week open
+        w.lectures.push(makeLecture(name));
+        expandedWeeks.add(payload.weekId);
         commit('Lecture added.');
       });
       break;
@@ -136,10 +126,7 @@ function dispatch(action, payload = {}) {
       showConfirmModal(`Delete "${lec.lectureName}"?`, () => {
         w.lectures = w.lectures.filter(l => l.lectureId !== payload.lectureId);
         expandedLectures.delete(payload.lectureId);
-        // If week was marked complete but core is now broken, un-mark it
-        if (w.weekCompleted && !isWeekCoreComplete(w)) {
-          w.weekCompleted = false;
-        }
+        if (w.weekCompleted && !isWeekCoreComplete(w)) w.weekCompleted = false;
         commit('Lecture deleted.');
       });
       break;
@@ -150,27 +137,28 @@ function dispatch(action, payload = {}) {
       render();
       break;
 
+    /* ═══ LECTURE NOTES (auto-save, no re-render) ═══ */
+
+    case 'SAVE_LECTURE_NOTE': {
+      const lec = findLecture(payload.weekId, payload.lectureId);
+      if (lec) { lec.notes = payload.text; save(); }
+      break;
+    }
+
     /* ═══ LECTURE BOOLEAN TOGGLES ═══ */
 
     case 'LECTURE_TOGGLE': {
       const lec = findLecture(payload.weekId, payload.lectureId);
       if (!lec) break;
-
       lec[payload.field] = payload.value;
-
-      // Un-ticking a core action invalidates week completion
-      if (!payload.value && ['watched', 'memoryNote', 'finalNote'].includes(payload.field)) {
+      if (!payload.value && ['watched','memoryNote','finalNote'].includes(payload.field)) {
         const w = findWeek(payload.weekId);
         if (w && w.weekCompleted) {
           w.weekCompleted = false;
-          showToast('Week completion un-marked (core action unchecked).', 'warn');
+          showToast('Week completion removed (core action unchecked).', 'warn');
         }
       }
-
-      const gained = syncXP();
-      recordXPHistory(gained);
-      save();
-      render();
+      xpCommit();
       break;
     }
 
@@ -179,31 +167,18 @@ function dispatch(action, payload = {}) {
     case 'LECTURE_STEP': {
       const lec = findLecture(payload.weekId, payload.lectureId);
       if (!lec) break;
-
       switch (payload.action) {
         case 'actTotal-inc': lec.activityTotal++; break;
         case 'actTotal-dec':
           lec.activityTotal = Math.max(0, lec.activityTotal - 1);
           lec.activityDone  = Math.min(lec.activityDone, lec.activityTotal);
           break;
-        case 'actDone-inc':
-          if (lec.activityDone < lec.activityTotal) lec.activityDone++;
-          break;
-        case 'actDone-dec':
-          if (lec.activityDone > 0) lec.activityDone--;
-          break;
-        case 'rev-inc':
-          lec.revisionCount = (lec.revisionCount || 0) + 1;
-          break;
-        case 'rev-dec':
-          lec.revisionCount = Math.max(0, (lec.revisionCount || 0) - 1);
-          break;
+        case 'actDone-inc': if (lec.activityDone < lec.activityTotal) lec.activityDone++; break;
+        case 'actDone-dec': if (lec.activityDone > 0) lec.activityDone--; break;
+        case 'rev-inc': lec.revisionCount = (lec.revisionCount || 0) + 1; break;
+        case 'rev-dec': lec.revisionCount = Math.max(0, (lec.revisionCount || 0) - 1); break;
       }
-
-      const gained = syncXP();
-      recordXPHistory(gained);
-      save();
-      render();
+      xpCommit();
       break;
     }
 
@@ -212,28 +187,17 @@ function dispatch(action, payload = {}) {
     case 'ASSIGNMENT_STEP': {
       const w = findWeek(payload.weekId);
       if (!w) break;
-      const asgn = payload.type === 'practice'
-        ? w.practiceAssignment
-        : w.gradedAssignment;
-
+      const a = payload.type === 'practice' ? w.practiceAssignment : w.gradedAssignment;
       switch (payload.dir) {
-        case 'total-inc': asgn.totalQuestions++; break;
+        case 'total-inc': a.totalQuestions++; break;
         case 'total-dec':
-          asgn.totalQuestions = Math.max(0, asgn.totalQuestions - 1);
-          asgn.doneQuestions  = Math.min(asgn.doneQuestions, asgn.totalQuestions);
+          a.totalQuestions = Math.max(0, a.totalQuestions - 1);
+          a.doneQuestions  = Math.min(a.doneQuestions, a.totalQuestions);
           break;
-        case 'done-inc':
-          if (asgn.doneQuestions < asgn.totalQuestions) asgn.doneQuestions++;
-          break;
-        case 'done-dec':
-          if (asgn.doneQuestions > 0) asgn.doneQuestions--;
-          break;
+        case 'done-inc': if (a.doneQuestions < a.totalQuestions) a.doneQuestions++; break;
+        case 'done-dec': if (a.doneQuestions > 0) a.doneQuestions--; break;
       }
-
-      const gained = syncXP();
-      recordXPHistory(gained);
-      save();
-      render();
+      xpCommit();
       break;
     }
 
@@ -243,35 +207,58 @@ function dispatch(action, payload = {}) {
       const w = findWeek(payload.weekId);
       if (!w) break;
 
-      // Guard: week completion requires all core lecture actions done
       if (payload.field === 'weekCompleted' && payload.value && !isWeekCoreComplete(w)) {
         showToast('Complete all lecture core actions first (Watched + Memory Note + Final Note).', 'warn');
-        render(); // re-render to revert checkbox visual
+        render();
         break;
       }
 
       w[payload.field] = payload.value;
 
-      const gained = syncXP();
-      recordXPHistory(gained);
-      save();
-      render();
-
+      // Reward: earn a streak freeze when completing a week (max 3)
       if (payload.field === 'weekCompleted' && payload.value) {
-        showToast('🎉 Week complete! +15 XP bonus earned.', 'success');
+        if ((program.streakFreezes || 0) < XP.MAX_FREEZES) {
+          program.streakFreezes = (program.streakFreezes || 0) + 1;
+          setTimeout(() => showToast(`🎉 Week complete! +15 XP · ❄️ Earned a Streak Freeze (${program.streakFreezes}/${XP.MAX_FREEZES})`, 'success'), 100);
+        } else {
+          setTimeout(() => showToast('🎉 Week complete! +15 XP bonus.', 'success'), 100);
+        }
       }
+
+      xpCommit();
       break;
     }
 
-    /* ═══ GRAPH TOGGLE ═══ */
+    /* ═══ GRAPH ═══ */
 
     case 'TOGGLE_GRAPH':
       graphVisible = !graphVisible;
-      const graphSection = document.getElementById('graph-section');
-      const graphBtn     = document.getElementById('btn-graph');
-      if (graphSection) graphSection.classList.toggle('hidden', !graphVisible);
-      if (graphBtn)     graphBtn.textContent = graphVisible ? '▲ Hide Graph' : '▼ XP Graph';
+      document.getElementById('graph-section')?.classList.toggle('hidden', !graphVisible);
+      document.getElementById('btn-graph').textContent = graphVisible ? '▲ Hide Graph' : '▼ XP Graph';
       if (graphVisible) setTimeout(() => renderXPGraph(program.xpHistory), 50);
+      break;
+
+    /* ═══ STATS PANEL ═══ */
+
+    case 'TOGGLE_STATS':
+      statsVisible = !statsVisible;
+      document.getElementById('stats-section')?.classList.toggle('hidden', !statsVisible);
+      document.getElementById('btn-stats').textContent = statsVisible ? '▲ Hide Stats' : '◎ Stats';
+      if (statsVisible) renderStats(program);
+      break;
+
+    /* ═══ EXPORT ═══ */
+
+    case 'EXPORT_DATA': {
+      const filename = exportBackup(program);
+      showToast(`✓ Backup downloaded: ${filename}`, 'success');
+      break;
+    }
+
+    /* ═══ IMPORT ═══ */
+
+    case 'IMPORT_DATA':
+      document.getElementById('import-file-input')?.click();
       break;
 
     default:
@@ -279,12 +266,12 @@ function dispatch(action, payload = {}) {
   }
 }
 
-/* ────────────────────────────────────────────
+/* ─────────────────────────────────────────
    FACTORIES
-──────────────────────────────────────────── */
+───────────────────────────────────────── */
 
-function addWeek(name) {
-  const week = {
+function makeWeek(name) {
+  return {
     weekId:    generateId('w'),
     weekName:  name,
     lectures:  [],
@@ -295,12 +282,9 @@ function addWeek(name) {
     weekCompleted:    false,
     xpEarned:         0
   };
-  program.weeks.push(week);
-  expandedWeeks.add(week.weekId);
-  commit('Week added.');
 }
 
-function createLecture(name) {
+function makeLecture(name) {
   return {
     lectureId:     generateId('l'),
     lectureName:   name,
@@ -310,27 +294,21 @@ function createLecture(name) {
     activityDone:  0,
     finalNote:     false,
     revisionCount: 0,
+    notes:         '',
     xpEarned:      0
   };
 }
 
-/* ────────────────────────────────────────────
+/* ─────────────────────────────────────────
    HELPERS
-──────────────────────────────────────────── */
+───────────────────────────────────────── */
 
-function findWeek(weekId) {
-  return program.weeks.find(w => w.weekId === weekId) || null;
+function findWeek(id)            { return program.weeks.find(w => w.weekId === id) || null; }
+function findLecture(wId, lId)   {
+  const w = findWeek(wId);
+  return w ? (w.lectures.find(l => l.lectureId === lId) || null) : null;
 }
-
-function findLecture(weekId, lectureId) {
-  const w = findWeek(weekId);
-  if (!w) return null;
-  return w.lectures.find(l => l.lectureId === lectureId) || null;
-}
-
-function toggle(set, key) {
-  set.has(key) ? set.delete(key) : set.add(key);
-}
+function toggle(set, key)        { set.has(key) ? set.delete(key) : set.add(key); }
 
 function syncXP() {
   const prev      = program.totalXP;
@@ -339,56 +317,90 @@ function syncXP() {
   return Math.max(0, program.totalXP - prev);
 }
 
-function recordXPHistory(gained) {
+function recordXP(gained) {
   if (gained <= 0) return;
   const today = todayISO();
   program.xpHistory[today] = (program.xpHistory[today] || 0) + gained;
-
-  // Trim entries older than 365 days
+  // Trim beyond 365 days
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 365);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
-  for (const key of Object.keys(program.xpHistory)) {
-    if (key < cutoffStr) delete program.xpHistory[key];
-  }
+  for (const k of Object.keys(program.xpHistory))
+    if (k < cutoffStr) delete program.xpHistory[k];
 }
 
-function save() {
-  saveProgram(program);
-}
+function save()   { saveProgram(program); }
 
-function commit(toastMsg) {
-  syncXP();
+/** XP recalc + record + save + render — used after any data change */
+function xpCommit() {
+  const gained = syncXP();
+  recordXP(gained);
   save();
   render();
-  if (toastMsg) showToast(toastMsg, 'info');
+}
+
+/** Full commit with optional toast */
+function commit(msg) {
+  xpCommit();
+  if (msg) showToast(msg, 'info');
 }
 
 function render() {
   renderHeader(program);
   renderWeeks(program, dispatch, expandedWeeks, expandedLectures);
   if (graphVisible) renderXPGraph(program.xpHistory);
+  if (statsVisible) renderStats(program);
 }
 
-/* ────────────────────────────────────────────
-   STATIC EVENT LISTENERS
-──────────────────────────────────────────── */
+/* ─────────────────────────────────────────
+   STATIC LISTENERS
+───────────────────────────────────────── */
 
 function wireStaticListeners() {
-  document.getElementById('btn-add-week')?.addEventListener('click', () => {
-    dispatch('ADD_WEEK');
-  });
+  document.getElementById('btn-add-week')?.addEventListener('click', () => dispatch('ADD_WEEK'));
+  document.getElementById('btn-graph')?.addEventListener('click',    () => dispatch('TOGGLE_GRAPH'));
+  document.getElementById('btn-stats')?.addEventListener('click',    () => dispatch('TOGGLE_STATS'));
+  document.getElementById('btn-export')?.addEventListener('click',   () => dispatch('EXPORT_DATA'));
+  document.getElementById('btn-import')?.addEventListener('click',   () => dispatch('IMPORT_DATA'));
 
-  document.getElementById('btn-graph')?.addEventListener('click', () => {
-    dispatch('TOGGLE_GRAPH');
-  });
+  // Hidden file input for import
+  const fileInput = document.getElementById('import-file-input');
+  if (fileInput) {
+    fileInput.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const result = parseImportedBackup(ev.target.result);
+        fileInput.value = ''; // reset so same file can trigger again
+
+        if (!result.ok) {
+          showToast(`Import failed: ${result.error}`, 'warn');
+          return;
+        }
+
+        const wc = result.program.weeks.length;
+        const xp = result.program.totalXP;
+        showConfirmModal(
+          `Import backup?\n\n${wc} weeks · ${xp} XP total\n\nThis REPLACES all current data.`,
+          () => {
+            program = result.program;
+            saveProgram(program);
+            syncXP();
+            render();
+            showToast(`✓ Restored: ${wc} weeks imported.`, 'success');
+          }
+        );
+      };
+      reader.readAsText(file);
+    });
+  }
 
   // Redraw graph on resize
-  let resizeTimer;
+  let rt;
   window.addEventListener('resize', () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      if (graphVisible) renderXPGraph(program.xpHistory);
-    }, 150);
+    clearTimeout(rt);
+    rt = setTimeout(() => { if (graphVisible) renderXPGraph(program.xpHistory); }, 150);
   });
 }
