@@ -6,7 +6,7 @@
  * Otherwise the old cached version will keep loading.
  */
 
-const CACHE_NAME = 'iit-learn-v1.0.2';
+const CACHE_NAME = 'iit-learn-v1.1.0';
 
 const APP_SHELL = [
   './',
@@ -15,7 +15,11 @@ const APP_SHELL = [
   './app.js',
   './storage.js',
   './xpEngine.js',
-  './ui.js',
+  './src/ui/index.js',
+  './src/ui/modals.js',
+  './src/ui/graph.js',
+  './src/ui/lectureCard.js',
+  './src/ui/weekCard.js',
   './manifest.json',
   './icon-192.svg',
   './icon-512.svg'
