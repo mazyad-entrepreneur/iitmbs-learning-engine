@@ -891,3 +891,57 @@ button:focus-visible, input:focus-visible {
 
 /* Selection */
 ::selection { background: rgba(245,158,11,0.25); }
+
+/* ────────────────────────────────────────────
+   ADDITIONS: Revision pill + layout fixes
+──────────────────────────────────────────── */
+
+/* Purple pill for revision count */
+.pill-purple {
+  background: rgba(167, 139, 250, 0.2);
+  color: #a78bfa;
+}
+
+/* Ensure lecture detail inner has padding */
+.lecture-detail-inner {
+  padding-bottom: 4px;
+}
+
+/* Activity row: ensure controls sit inline */
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  flex-wrap: wrap;
+}
+.activity-row:last-of-type {
+  border-bottom: none;
+}
+
+/* Assignment controls: compact stepper in row */
+.asgn-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* action-row: make sure click area covers full row */
+.action-row {
+  cursor: pointer;
+}
+.action-row.row-locked {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Modal confirm button alias */
+.btn-confirm.btn-primary {
+  background: var(--amber);
+  color: #0d0d14;
+}
+.btn-confirm.btn-primary:hover {
+  background: #fbbf24;
+}

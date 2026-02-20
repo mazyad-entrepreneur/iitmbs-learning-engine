@@ -7,7 +7,7 @@
  */
 
 const STORAGE_KEY = 'iit_learn_program_v1';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2; // bumped v1→v2: added revisionCount to lectures
 
 /** Return a fresh default program state */
 export function createDefaultProgram() {
@@ -17,8 +17,8 @@ export function createDefaultProgram() {
     totalXP: 0,
     level: 1,
     streak: 0,
-    lastActiveDate: null,   // ISO date string YYYY-MM-DD
-    xpHistory: {}           // { "YYYY-MM-DD": <xp_earned_that_day> }
+    lastActiveDate: null,
+    xpHistory: {}
   };
 }
 
@@ -27,7 +27,6 @@ export function loadProgram() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return createDefaultProgram();
-
     const parsed = JSON.parse(raw);
     return migrate(parsed);
   } catch (err) {
@@ -43,7 +42,6 @@ export function saveProgram(program) {
     return true;
   } catch (err) {
     console.error('[Storage] Save failed:', err);
-    // Warn user if quota exceeded
     if (err.name === 'QuotaExceededError') {
       alert('Storage quota exceeded. Please clear some data.');
     }
@@ -51,21 +49,25 @@ export function saveProgram(program) {
   }
 }
 
-/** Clear all saved data (used for reset) */
+/** Clear all saved data */
 export function clearProgram() {
   localStorage.removeItem(STORAGE_KEY);
 }
 
 /**
  * Schema migration: transform old data shapes to current schema.
- * Add cases here as schema evolves.
  */
 function migrate(data) {
   const version = data.schemaVersion || 0;
 
-  if (version < 1) {
-    // Future: migrate from v0 → v1
-    data.schemaVersion = 1;
+  if (version < 2) {
+    // v1 → v2: add revisionCount to all existing lectures
+    for (const week of (data.weeks || [])) {
+      for (const lec of (week.lectures || [])) {
+        if (lec.revisionCount === undefined) lec.revisionCount = 0;
+      }
+    }
+    data.schemaVersion = 2;
   }
 
   // Ensure all required top-level fields exist (defensive)
@@ -77,7 +79,7 @@ function migrate(data) {
   return data;
 }
 
-/** Generate a unique ID (timestamp + random suffix) */
+/** Generate a unique ID */
 export function generateId(prefix = 'id') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }

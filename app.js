@@ -8,9 +8,6 @@
  *
  * Architecture: Event dispatch pattern.
  *   dispatch(action, payload) → mutate state → save → re-render
- *
- * All state mutations go through dispatch() to guarantee
- * consistent save + XP recalculation + re-render cycle.
  */
 
 import { loadProgram, saveProgram, generateId, todayISO } from './storage.js';
@@ -33,10 +30,9 @@ import {
    APP STATE
 ──────────────────────────────────────────── */
 
-/** Current program (mutated in place, then saved) */
 let program;
 
-/** UI-only state (not persisted) */
+// UI-only state (not persisted)
 const expandedWeeks    = new Set();
 const expandedLectures = new Set();
 let   graphVisible     = false;
@@ -54,39 +50,32 @@ export function initApp() {
   program.streak         = streak;
   program.lastActiveDate = lastActiveDate;
 
-  // Initial XP sync (in case of schema migration)
+  // Initial XP sync (handles schema migration gaps)
   syncXP();
   saveProgram(program);
 
-  // Register service worker
+  // Register Service Worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js')
-      .then(reg => console.log('[SW] Registered, scope:', reg.scope))
-      .catch(err => console.warn('[SW] Registration failed:', err));
+      .then(reg => console.log('[SW] Registered:', reg.scope))
+      .catch(err => console.warn('[SW] Failed:', err));
   }
 
-  // Wire static DOM event listeners
   wireStaticListeners();
-
-  // First render
   render();
 }
 
 /* ────────────────────────────────────────────
-   DISPATCH — central state mutation handler
+   DISPATCH
 ──────────────────────────────────────────── */
 
-/**
- * All actions flow through here.
- * @param {string} action - action type
- * @param {Object} payload
- */
 function dispatch(action, payload = {}) {
   switch (action) {
 
-    /* ── Week management ── */
+    /* ═══ WEEK MANAGEMENT ═══ */
+
     case 'ADD_WEEK':
-      showPromptModal('Add Week', 'e.g. Week 1: Linear Algebra', '', name => {
+      showPromptModal('New Week', 'e.g. Week 1: Linear Algebra', '', name => {
         addWeek(name);
       });
       break;
@@ -104,7 +93,7 @@ function dispatch(action, payload = {}) {
     case 'DELETE_WEEK': {
       const w = findWeek(payload.weekId);
       if (!w) break;
-      showConfirmModal(`Delete "${w.weekName}" and all its data?`, () => {
+      showConfirmModal(`Delete "${w.weekName}" and all its lectures?`, () => {
         program.weeks = program.weeks.filter(x => x.weekId !== payload.weekId);
         expandedWeeks.delete(payload.weekId);
         commit('Week deleted.');
@@ -114,16 +103,17 @@ function dispatch(action, payload = {}) {
 
     case 'TOGGLE_WEEK':
       toggle(expandedWeeks, payload.weekId);
-      render(); // UI-only, no save needed
+      render(); // UI-only — no save needed
       break;
 
-    /* ── Lecture management ── */
+    /* ═══ LECTURE MANAGEMENT ═══ */
+
     case 'ADD_LECTURE': {
       const w = findWeek(payload.weekId);
       if (!w) break;
-      showPromptModal('Add Lecture', 'e.g. Lecture 3: Eigenvalues', '', name => {
+      showPromptModal('New Lecture', 'e.g. Lecture 3: Eigenvalues', '', name => {
         w.lectures.push(createLecture(name));
-        expandedWeeks.add(payload.weekId); // auto-expand week
+        expandedWeeks.add(payload.weekId); // keep week open
         commit('Lecture added.');
       });
       break;
@@ -140,14 +130,13 @@ function dispatch(action, payload = {}) {
     }
 
     case 'DELETE_LECTURE': {
-      const w = findWeek(payload.weekId);
-      if (!w) break;
+      const w   = findWeek(payload.weekId);
       const lec = findLecture(payload.weekId, payload.lectureId);
-      if (!lec) break;
+      if (!w || !lec) break;
       showConfirmModal(`Delete "${lec.lectureName}"?`, () => {
         w.lectures = w.lectures.filter(l => l.lectureId !== payload.lectureId);
         expandedLectures.delete(payload.lectureId);
-        // If week was marked complete but now core is broken, unmark it
+        // If week was marked complete but core is now broken, un-mark it
         if (w.weekCompleted && !isWeekCoreComplete(w)) {
           w.weekCompleted = false;
         }
@@ -158,29 +147,35 @@ function dispatch(action, payload = {}) {
 
     case 'TOGGLE_LECTURE':
       toggle(expandedLectures, payload.lectureId);
-      render(); // UI-only
+      render();
       break;
 
-    /* ── Lecture field toggles ── */
+    /* ═══ LECTURE BOOLEAN TOGGLES ═══ */
+
     case 'LECTURE_TOGGLE': {
       const lec = findLecture(payload.weekId, payload.lectureId);
       if (!lec) break;
+
       lec[payload.field] = payload.value;
 
-      // If un-checking a core action and week was complete, unmark it
+      // Un-ticking a core action invalidates week completion
       if (!payload.value && ['watched', 'memoryNote', 'finalNote'].includes(payload.field)) {
         const w = findWeek(payload.weekId);
-        if (w && w.weekCompleted) w.weekCompleted = false;
+        if (w && w.weekCompleted) {
+          w.weekCompleted = false;
+          showToast('Week completion un-marked (core action unchecked).', 'warn');
+        }
       }
 
-      const xpGained = syncXP();
-      recordXPHistory(xpGained);
+      const gained = syncXP();
+      recordXPHistory(gained);
       save();
       render();
       break;
     }
 
-    /* ── Lecture activity steppers ── */
+    /* ═══ LECTURE STEPPERS ═══ */
+
     case 'LECTURE_STEP': {
       const lec = findLecture(payload.weekId, payload.lectureId);
       if (!lec) break;
@@ -197,16 +192,23 @@ function dispatch(action, payload = {}) {
         case 'actDone-dec':
           if (lec.activityDone > 0) lec.activityDone--;
           break;
+        case 'rev-inc':
+          lec.revisionCount = (lec.revisionCount || 0) + 1;
+          break;
+        case 'rev-dec':
+          lec.revisionCount = Math.max(0, (lec.revisionCount || 0) - 1);
+          break;
       }
 
-      const xpGained = syncXP();
-      recordXPHistory(xpGained);
+      const gained = syncXP();
+      recordXPHistory(gained);
       save();
       render();
       break;
     }
 
-    /* ── Assignment steppers ── */
+    /* ═══ ASSIGNMENT STEPPERS ═══ */
+
     case 'ASSIGNMENT_STEP': {
       const w = findWeek(payload.weekId);
       if (!w) break;
@@ -228,48 +230,52 @@ function dispatch(action, payload = {}) {
           break;
       }
 
-      const xpGained = syncXP();
-      recordXPHistory(xpGained);
+      const gained = syncXP();
+      recordXPHistory(gained);
       save();
       render();
       break;
     }
 
-    /* ── Weekly toggles ── */
+    /* ═══ WEEKLY TOGGLES ═══ */
+
     case 'WEEK_TOGGLE': {
       const w = findWeek(payload.weekId);
       if (!w) break;
 
-      // weekCompleted requires core completion check
+      // Guard: week completion requires all core lecture actions done
       if (payload.field === 'weekCompleted' && payload.value && !isWeekCoreComplete(w)) {
-        showToast('Complete all lecture core actions first.', 'warn');
-        render(); // re-render to uncheck the box
+        showToast('Complete all lecture core actions first (Watched + Memory Note + Final Note).', 'warn');
+        render(); // re-render to revert checkbox visual
         break;
       }
 
       w[payload.field] = payload.value;
-      const xpGained = syncXP();
-      recordXPHistory(xpGained);
+
+      const gained = syncXP();
+      recordXPHistory(gained);
       save();
       render();
+
       if (payload.field === 'weekCompleted' && payload.value) {
-        showToast(`🎉 Week complete! +15 XP bonus`, 'success');
+        showToast('🎉 Week complete! +15 XP bonus earned.', 'success');
       }
       break;
     }
 
-    /* ── Graph toggle ── */
+    /* ═══ GRAPH TOGGLE ═══ */
+
     case 'TOGGLE_GRAPH':
       graphVisible = !graphVisible;
-      document.getElementById('graph-section').classList.toggle('hidden', !graphVisible);
-      document.getElementById('btn-graph').textContent = graphVisible ? '▲ Hide Graph' : '▼ XP Graph';
-      if (graphVisible) {
-        setTimeout(() => renderXPGraph(program.xpHistory), 50);
-      }
+      const graphSection = document.getElementById('graph-section');
+      const graphBtn     = document.getElementById('btn-graph');
+      if (graphSection) graphSection.classList.toggle('hidden', !graphVisible);
+      if (graphBtn)     graphBtn.textContent = graphVisible ? '▲ Hide Graph' : '▼ XP Graph';
+      if (graphVisible) setTimeout(() => renderXPGraph(program.xpHistory), 50);
       break;
 
     default:
-      console.warn('[App] Unknown action:', action);
+      console.warn('[App] Unknown action:', action, payload);
   }
 }
 
@@ -284,13 +290,13 @@ function addWeek(name) {
     lectures:  [],
     practiceAssignment: { totalQuestions: 0, doneQuestions: 0 },
     gradedAssignment:   { totalQuestions: 0, doneQuestions: 0 },
-    weeklyMemoryNote:   false,
-    weeklyFinalNote:    false,
-    weekCompleted:      false,
-    xpEarned:           0
+    weeklyMemoryNote: false,
+    weeklyFinalNote:  false,
+    weekCompleted:    false,
+    xpEarned:         0
   };
   program.weeks.push(week);
-  expandedWeeks.add(week.weekId); // auto-expand new week
+  expandedWeeks.add(week.weekId);
   commit('Week added.');
 }
 
@@ -303,6 +309,7 @@ function createLecture(name) {
     activityTotal: 0,
     activityDone:  0,
     finalNote:     false,
+    revisionCount: 0,
     xpEarned:      0
   };
 }
@@ -325,27 +332,19 @@ function toggle(set, key) {
   set.has(key) ? set.delete(key) : set.add(key);
 }
 
-/**
- * Recalculate total XP, update level.
- * @returns {number} XP delta (gained since last call)
- */
 function syncXP() {
-  const prevXP    = program.totalXP;
+  const prev      = program.totalXP;
   program.totalXP = recalculateTotalXP(program);
   program.level   = getLevel(program.totalXP);
-  return Math.max(0, program.totalXP - prevXP);
+  return Math.max(0, program.totalXP - prev);
 }
 
-/**
- * Record XP gained today in xpHistory.
- * @param {number} gained
- */
 function recordXPHistory(gained) {
   if (gained <= 0) return;
   const today = todayISO();
   program.xpHistory[today] = (program.xpHistory[today] || 0) + gained;
 
-  // Trim history older than 365 days
+  // Trim entries older than 365 days
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 365);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
@@ -354,12 +353,10 @@ function recordXPHistory(gained) {
   }
 }
 
-/** Save to localStorage */
 function save() {
   saveProgram(program);
 }
 
-/** Shorthand: syncXP + save + render, with optional toast */
 function commit(toastMsg) {
   syncXP();
   save();
@@ -367,7 +364,6 @@ function commit(toastMsg) {
   if (toastMsg) showToast(toastMsg, 'info');
 }
 
-/** Full re-render cycle */
 function render() {
   renderHeader(program);
   renderWeeks(program, dispatch, expandedWeeks, expandedLectures);
@@ -387,7 +383,7 @@ function wireStaticListeners() {
     dispatch('TOGGLE_GRAPH');
   });
 
-  // Redraw graph on window resize
+  // Redraw graph on resize
   let resizeTimer;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
